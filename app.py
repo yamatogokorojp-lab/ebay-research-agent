@@ -13,7 +13,6 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from ai_client import AIClientError, analyze_candidate
-from ebay_api import EbayApiError, discover_active_offers, get_app_token, search_current_listings, suggest_categories
 from engine import Settings, evaluate_all, number, yes
 from fx import usd_jpy_rate, FxError
 from sourcing_api import rakuten_search, yahoo_search, match_model, search_links, SourcingApiError
@@ -29,7 +28,7 @@ try:
     deployment_secrets = dict(st.secrets)
 except Exception:  # No secrets.toml in a local/default installation.
     deployment_secrets = {}
-for secret_name in ("EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "RAKUTEN_APP_ID",
+for secret_name in ("RAKUTEN_APP_ID",
                     "RAKUTEN_ACCESS_KEY", "YAHOO_CLIENT_ID", "OPENAI_API_KEY",
                     "OPENAI_MODEL", "OFFICIAL_SURCHARGE_JSON_URL", "ENABLE_PUBLIC_AI"):
     if secret_name in deployment_secrets and isinstance(deployment_secrets[secret_name], str):
@@ -55,8 +54,8 @@ def tr(japanese, english):
     return english if ENGLISH else japanese
 with head:
     st.title(tr("📦 eBay 商品リサーチ AI", "📦 eBay Product Research AI"))
-st.caption(tr("CSV・eBay現行出品検索・楽天/Yahoo在庫あり仕入れ検索・PDF基本運賃比較・利益試算（最新の追加料金は要確認）",
-              "CSV research · eBay active offers · in-stock Rakuten/Yahoo sourcing · PDF base freight · estimated profit (live surcharges not verified)"))
+st.caption(tr("CSV・eBay検索リンク・楽天/Yahoo在庫あり仕入れ検索・PDF基本運賃比較・利益試算（最新の追加料金は要確認）",
+              "CSV research · eBay search links · in-stock Rakuten/Yahoo sourcing · PDF base freight · estimated profit (live surcharges not verified)"))
 st.warning(tr("CSV未アップロード時は**架空のデモデータ**です。実在庫やeBayの成約実績を示しません。楽天/YahooのAPIが未設定なら検索できません。",
               "Without a CSV upload, **sample figures are fictitious**. They are NOT eBay sold history or verified inventory. Shopping APIs require provider credentials."), icon="⚠️")
 if ENGLISH:
@@ -158,7 +157,7 @@ with st.sidebar:
     st.caption("関税12.5%はユーザー指定の試算率です。品目・原産国で実際の税額が変わる可能性があります。")
     st.divider()
     st.markdown("**外部APIの設定**")
-    st.text("eBay: " + ("キー設定済" if os.getenv("EBAY_CLIENT_ID") and os.getenv("EBAY_CLIENT_SECRET") else "未設定（CSVのみで利用可）"))
+    st.text("eBay: API不要（検索リンク方式・販売アカウント非連携）")
     st.text("OpenAI: " + ("公開版では無効" if os.getenv("ENABLE_PUBLIC_AI", "false").lower() != "true" else ("キー設定済" if os.getenv("OPENAI_API_KEY") else "未設定")))
     st.text("楽天: " + ("キー設定済" if os.getenv("RAKUTEN_APP_ID") else "未設定"))
     st.text("Yahoo!: " + ("キー設定済" if os.getenv("YAHOO_CLIENT_ID") else "未設定"))
@@ -170,28 +169,18 @@ settings = Settings(fx_jpy_per_usd=fx, ebay_fee_pct=ebay_fee, ad_fee_pct=ad_fee,
                     other_shipping_surcharge_jpy=other_surcharge, economy_import_fee_jpy=economy_fee,
                     economy_duty_processing_pct=economy_processing_pct, method_fees=fee_rates)
 
-st.subheader(tr("0. キーワードから新しい商品候補を探す（eBay API・任意）", "0. Discover product candidates (optional eBay API)"))
-st.caption("これはeBayの**販売中出品**を使った商品候補リスト生成です。売れた件数やメルカリ等の仕入れ価格は取得しません。")
-keyword_text = st.text_area("英語検索ワード（1行1語、最大5行）", value="SONY RM-DR1J\nSEIKO SND379P1", height=80)
-keyword_count = st.slider("キーワードあたりの現行出品サンプル数", min_value=5, max_value=30, value=10, step=5)
-if st.button(tr("検索ワードから商品候補CSVを作る", "Generate candidate CSV from keywords"), disabled=not bool(keyword_text.strip())):
-    require_api_budget()
-    try:
-        qlist = [x.strip() for x in keyword_text.splitlines() if x.strip()][:5]
-        token = get_app_token(os.getenv("EBAY_CLIENT_ID", ""), os.getenv("EBAY_CLIENT_SECRET", ""))
-        with st.spinner("eBay APIから販売中の商品候補を取得しています"):
-            st.session_state.discovered_candidates = discover_active_offers(token, qlist, keyword_count)
-        st.success(f"現行出品から{len(st.session_state.discovered_candidates)}件の候補を取得しました。仕入れ原価と送料は未入力です。")
-    except EbayApiError as err:
-        st.error(str(err))
-if st.session_state.get("discovered_candidates"):
-    discovered = pd.DataFrame(st.session_state.discovered_candidates)
-    st.dataframe(discovered[["sku", "title", "reference_active_price_usd", "reference_condition", "reference_ebay_url"]],
-                 use_container_width=True, hide_index=True,
-                 column_config={"reference_ebay_url": st.column_config.LinkColumn("参照元出品")})
-    st.download_button("抽出した商品候補を仕入れ候補CSVとして保存", discovered.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="discovered_candidates.csv", mime="text/csv")
-    st.caption("保存したCSVに仕入れ価格・確認済み仕入れURL・送料・梱包重量・希望売価を追記し、次の欄にアップロードしてください。")
+st.subheader(tr("0. eBay検索リンクと仕入れ候補CSVを作る（API不要）", "0. eBay search links and candidate CSV (no API)"))
+st.caption(tr("eBayの検索結果は公式サイトで確認します。成約数・売価・在庫は自動取得しません。候補CSVの仕入れ価格と希望売価は空欄です。", "Open eBay results on its website. Sold prices and listing data are not fetched automatically; candidate prices are blank."))
+keyword_text = st.text_area(tr("検索ワード（1行1商品、最大20行）", "Search terms (one product per line, up to 20)"), value="SONY RM-DR1J\nSEIKO SND379P1", height=90)
+keyword_lines = [q.strip() for q in keyword_text.splitlines() if q.strip()][:20]
+if keyword_lines:
+    link_rows = [{"検索語 / Keyword": q, "eBay検索 / eBay search": "https://www.ebay.com/sch/i.html?_nkw=" + quote(q)} for q in keyword_lines]
+    st.dataframe(pd.DataFrame(link_rows), use_container_width=True, hide_index=True, column_config={"eBay検索 / eBay search": st.column_config.LinkColumn("eBay検索を開く")})
+    candidate_rows = []
+    for index, q in enumerate(keyword_lines, start=1):
+        candidate_rows.append({"sku": f"RESEARCH-{index:03d}", "title": q, "brand": "", "model": "", "source": "", "source_url": "", "purchase_jpy": "", "domestic_shipping_jpy": "", "packed_weight_g": "", "packed_length_cm": "", "packed_width_cm": "", "packed_height_cm": "", "economy_shipping_jpy": "", "fedex_shipping_jpy": "", "dhl_shipping_jpy": "", "ems_shipping_jpy": "", "ems_eligible": "", "has_battery": "", "country_of_origin": "", "target_price_usd": "", "category_fee_pct": "", "extra_fees_jpy": "", "ebay_query": q})
+    st.download_button(tr("仕入れ候補CSVを保存（価格未入力）", "Download candidate CSV (prices blank)"), pd.DataFrame(candidate_rows).to_csv(index=False).encode('utf-8-sig'), file_name='keyword_candidate_template.csv', mime='text/csv')
+    st.caption(tr("eBay検索で相場を調べ、CSVに仕入れ価格・希望売価・梱包情報を入力してから、次の欄にアップロードしてください。", "Check prices on eBay, fill in purchase/target prices and shipping details, then upload the CSV below."))
 
 st.subheader(tr("1. ファイルを読み込む", "1. Upload product data"))
 left, right = st.columns(2)
@@ -279,7 +268,7 @@ if st.button(tr("楽天・YahooをAPIで検索（在庫ありのみ）", "Search
         rakuten_id = os.getenv('RAKUTEN_APP_ID','').strip()
         yahoo_id = os.getenv('YAHOO_CLIENT_ID','').strip()
         if not rakuten_id and not yahoo_id:
-            st.error("楽天またはYahooのAPIキーが未設定です。.env.exampleを参考に設定してください。")
+            st.error("楽天またはYahooのAPIキーが未設定です。公開版はStreamlitのSettings → Secretsで設定してください。検索リンクは上の欄から利用できます。")
         else:
             for marketplace, func, key in [
                 ('楽天', lambda: rakuten_search(buying_keyword, rakuten_id, os.getenv('RAKUTEN_ACCESS_KEY','')), rakuten_id),
@@ -361,38 +350,21 @@ if "live_market" not in st.session_state:
     st.session_state.live_market = {}
 
 sales_map = {str(r.get("sku", "")).strip(): r for r in sales_rows}
-st.subheader(tr("3. eBayの現行出品価格（任意）", "3. Current eBay asking prices (optional)"))
-st.caption("eBayの公式Browse APIを使用。『現在の出品価格』であり、テラピークの成約データではありません。広い検索語は別商品を含みます。")
-api_col, limit_col = st.columns([3, 1])
-with limit_col:
-    search_limit = st.number_input(tr("今回の検索SKU数", "SKUs to search"), min_value=1, max_value=20, value=5, step=1)
-with api_col:
-    fetch = st.button(tr("eBay公式APIで現行出品を検索", "Search active eBay listings"), type="secondary", disabled=not bool(source_rows))
-if fetch:
-    require_api_budget()
-    try:
-        token = get_app_token(os.getenv("EBAY_CLIENT_ID", ""), os.getenv("EBAY_CLIENT_SECRET", ""))
-        success, failures = 0, []
-        with st.spinner("eBayの現行出品情報を確認しています"):
-            for src in source_rows[:search_limit]:
-                sku = str(src.get("sku", "")).strip()
-                matching = sales_map.get(sku, {})
-                query = (matching.get("ebay_query") or src.get("ebay_query") or
-                         " ".join(x for x in (src.get("brand", ""), src.get("model", "")) if x).strip() or src.get("title", ""))
-                try:
-                    result = search_current_listings(token, str(query))
-                    st.session_state.live_market[sku] = result
-                    success += 1
-                except EbayApiError as err:
-                    failures.append(f"{sku}: {err}")
-        st.success(f"{success}件のSKUについてAPIを検索しました。")
-        for issue in failures[:5]:
-            st.warning(issue)
-    except EbayApiError as err:
-        st.error(str(err))
+st.subheader(tr("3. eBay現行出品を公式サイトで確認（API不要）", "3. Open current eBay listings (no API)"))
+st.caption(tr("検索リンクのみ表示します。eBay現行価格・成約履歴・販売件数は自動取得しません。", "Search links only. eBay asking prices, sold listings and sales counts are not fetched."))
+eb_link_rows=[]
+for src in source_rows[:50]:
+    sku = str(src.get('sku','')).strip()
+    matching = sales_map.get(sku, {})
+    query = (matching.get('ebay_query') or src.get('ebay_query') or
+             ' '.join(x for x in (src.get('brand', ''), src.get('model', '')) if x).strip() or src.get('title', ''))
+    eb_link_rows.append({'SKU':sku,'商品名':src.get('title',''),'eBay検索URL':'https://www.ebay.com/sch/i.html?_nkw='+quote(str(query))})
+if eb_link_rows:
+    st.dataframe(pd.DataFrame(eb_link_rows), use_container_width=True, hide_index=True,
+                 column_config={'eBay検索URL': st.column_config.LinkColumn('eBayで確認')})
 
-st.subheader(tr("3.5. eBayカテゴリー候補・カテゴリー別販売手数料", "3.5. eBay category suggestions and category-specific fees"))
-st.caption("eBay公式Taxonomy APIで商品名からカテゴリー候補とIDを取得できます。分類は出品者が選択して確定します。Taxonomy API自体は販売手数料率を返さないため、料率は確認済みの契約別手数料表と照合します。")
+st.subheader(tr("3.5. eBayカテゴリー手動確認・カテゴリー別販売手数料", "3.5. Manual category checks and category-specific fees"))
+st.caption("eBay APIは使用しません。eBayサイト上で正しいカテゴリーIDを確認し、CSVのカテゴリー情報や自己確認済み料率表を管理してください。未確認のIDやカテゴリー別料率を自動で決めません。")
 if "category_suggestions" not in st.session_state:
     st.session_state.category_suggestions = {}
 if "category_choices" not in st.session_state:
@@ -435,33 +407,8 @@ if selected_for_query and not category_choice_is_current(
     selected_for_query, category_query, st.session_state.category_fingerprints[category_sku]
 ):
     st.session_state.category_choices.pop(category_sku, None)
-if st.button('eBay公式APIでカテゴリー候補を検索'):
-    try:
-        token = get_app_token(os.getenv('EBAY_CLIENT_ID', ''), os.getenv('EBAY_CLIENT_SECRET', ''))
-        candidate_list = suggest_categories(token, category_query)
-        st.session_state.category_suggestions[category_sku] = {'query':category_query, 'choices':candidate_list}
-        st.session_state.category_choices.pop(category_sku, None)
-        st.session_state.pop(f'cat_choice_{category_sku}', None)
-        if not candidate_list:
-            st.warning('一致するカテゴリー候補がありません。カテゴリIDは確定できません。')
-    except EbayApiError as ex:
-        st.error(str(ex))
-
-suggestion_state = st.session_state.category_suggestions.get(category_sku, {})
-if suggestion_state.get('query') == category_query and suggestion_state.get('choices'):
-    category_options = suggestion_state['choices']
-    option_labels = ['採用しない'] + [f"{c['category_id']} | {c['path']}" for c in category_options]
-    category_selected = st.selectbox('商品の正しいカテゴリーを確認して選択', option_labels, key=f'cat_choice_{category_sku}')
-    if st.button('選択したカテゴリーをこのSKUに適用'):
-        if category_selected == '採用しない':
-            st.session_state.category_choices.pop(category_sku, None)
-        else:
-            selected_category = category_options[option_labels.index(category_selected)-1]
-            st.session_state.category_choices[category_sku] = {
-                **selected_category, '_category_query': category_query.strip(),
-                '_identity': st.session_state.category_fingerprints[category_sku],
-            }
-            st.success(f"カテゴリー候補を選択: {selected_category['category_id']} / {selected_category['name']}")
+st.markdown(f"[eBayで商品名を検索してカテゴリーを確認する](https://www.ebay.com/sch/i.html?_nkw={quote(category_query)})")
+st.info('APIなしモードではカテゴリー候補の自動取得は無効です。手数料の計算には検証済み料率表または共通の仮定値を使用します。')
 
 for row in source_rows:
     sku = str(row.get('sku','')).strip()
