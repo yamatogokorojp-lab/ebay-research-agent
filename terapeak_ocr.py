@@ -61,56 +61,114 @@ def _price(text: str):
     return m.group(2).replace(",", ""), ccy
 
 
-def extract_rows(words: pd.DataFrame, filename: str) -> list[dict]:
-    """Extract the visible table only, using the 'Fixed price' row anchors.
+def extract_rows(words: pd.DataFrame, filename: str, image_bytes: bytes | None = None) -> list[dict]:
+    """Read the visible Product Research result rows using column geometry.
 
-    Other Product Research screenshot designs may not be recognized and should
-    use the manual correction interface. Never manufacture missing values.
+    Works on continuation screenshots with no header. Uses the repeated
+    "Fixed price" sublabel as a row anchor, rather than header detection.
+    The default coordinates are measured against the entire browser screenshot.
+    Unreadable monetary/count cells remain blank (never inferred).
     """
     if words.empty:
         return []
-    width = words.attrs.get("width", max(words["left"] + words["width"]))
+    width = float(words.attrs.get("width", max(words["left"] + words["width"])))
+    fixed = words[words["text"].str.lower().str.fullmatch("fixed", na=False)]
+    price_label = words[words["text"].str.lower().str.fullmatch("price", na=False)]
     anchors = []
-    fixed = words[words["text"].str.lower().str.fullmatch(r"fixed", na=False)]
-    price_tokens = words[words["text"].str.lower().str.fullmatch(r"price", na=False)]
-    for _, w in fixed.iterrows():
-        following = price_tokens[(abs(price_tokens["cy"] - w["cy"]) < 18) & (price_tokens["left"] > w["left"]) & (price_tokens["left"] < w["left"] + 125)]
-        if not following.empty and w["cx"] > width * .48:
-            anchors.append(float(w["cy"]))
-    anchors = sorted(set(round(y, 0) for y in anchors))
-    rows = []
-    for idx, fixed_y in enumerate(anchors):
-        prior = anchors[idx - 1] if idx else None
-        next_ = anchors[idx + 1] if idx + 1 < len(anchors) else None
-        above = (fixed_y - prior) if prior else ((next_ - fixed_y) if next_ else 105)
-        below = (next_ - fixed_y) if next_ else above
-        # Row title/price is above the Fixed price sublabel, shipping sublabel also below.
-        lo = fixed_y - max(60, above * .83)
-        hi = fixed_y + min(45, below * .37)
+    for _, token in fixed.iterrows():
+        nearby = price_label[
+            (abs(price_label["cy"] - token["cy"]) <= max(15, width * .012))
+            & (price_label["left"] > token["left"])
+            & (price_label["left"] < token["left"] + width * .055)
+        ]
+        if not nearby.empty and width * .40 < token["cx"] < width * .58:
+            anchors.append(float(token["cy"]))
+    anchors = sorted(set(round(y) for y in anchors))
+    extracted = []
+    detail_image = None
+    if image_bytes is not None:
+        detail_image = ImageOps.autocontrast(Image.open(io.BytesIO(image_bytes)).convert("L"))
+        if detail_image.width < 1200:
+            ratio = min(2.0, 1400 / detail_image.width)
+            detail_image = detail_image.resize((int(detail_image.width * ratio), int(detail_image.height * ratio)))
+    for i, anchor in enumerate(anchors):
+        previous_gap = anchor - anchors[i - 1] if i else None
+        next_gap = anchors[i + 1] - anchor if i + 1 < len(anchors) else None
+        typical_gap = min([g for g in (previous_gap, next_gap) if g and 35 < g < width * .15] or [width * .036])
+        # Titles may wrap into two lines, centered at the sold-price line.
+        lo = anchor - min(max(typical_gap * .48, 30), 65)
+        hi = anchor + min(max(typical_gap * .17, 9), 21)
         band = words[(words["cy"] >= lo) & (words["cy"] <= hi)]
-        title_text = _text(band[(band["cx"] >= width * .13) & (band["cx"] < width * .46)])
-        price_text = _text(band[(band["cx"] >= width * .58) & (band["cx"] < width * .76)])
-        ship_text = _text(band[(band["cx"] >= width * .76) & (band["cx"] < width * .91)])
-        sold_text = _text(band[(band["cx"] >= width * .92)])
-        price, ccy = _price(price_text)
-        shipping, ship_ccy = _price(ship_text)
-        if ccy and ship_ccy and ccy != ship_ccy:
+        def col(left, right):
+            return band[(band["cx"] >= width * left) & (band["cx"] < width * right)]
+        title_words = col(.075, .325)
+        # Exclude sub-labels and small UI artifacts accidentally caught in the band.
+        title_words = title_words[~title_words["text"].str.lower().isin(["edit", "fixed", "price"])]
+        title = _text(title_words)
+        title = re.sub(r"\s+", " ", title).strip()
+        # Monetary cells: isolate the primary line above the 'Fixed price' anchor.
+        primary = band[(band["cy"] < anchor - 5) & (band["cy"] > anchor - max(35, typical_gap * .42))]
+        def primary_text(left, right):
+            return _text(primary[(primary["cx"] >= width * left) & (primary["cx"] < width * right)])
+        sold_price, currency = _price(primary_text(.44, .53))
+        shipping, shipping_currency = _price(primary_text(.54, .65))
+        sold_text = primary_text(.65, .73)
+        sold_numbers = re.findall(r"(?<![\d])\d{1,6}(?![\d])", sold_text)
+        units = sold_numbers[0] if sold_numbers else ""
+        # A narrow cell commonly disappears from whole-page OCR. Read just
+        # that numeric cell without changing any other column or guessing.
+        if not units and detail_image is not None:
+            try:
+                import pytesseract
+                y1, y2 = max(0, int(anchor - 43)), min(detail_image.height, int(anchor - 5))
+                cell = detail_image.crop((int(width * .644), y1, int(width * .735), y2))
+                cell = cell.resize((cell.width * 3, cell.height * 3))
+                detected = pytesseract.image_to_string(
+                    cell, config="--psm 7 -c tessedit_char_whitelist=0123456789").strip()
+                if re.fullmatch(r"\d{1,6}", detected):
+                    units = detected
+            except Exception:
+                pass
+        # Some currency cells are missed by whole-page OCR. Retry each cropped
+        # price cell independently. Accept only values with an explicit symbol;
+        # never turn arbitrary numbers into prices.
+        if detail_image is not None and (not sold_price or not shipping):
+            try:
+                import pytesseract
+                y1, y2 = max(0, int(anchor - 45)), min(detail_image.height, int(anchor - 8))
+                for key, x1, x2 in (("sold", .435, .53), ("shipping", .53, .645)):
+                    if (key == "sold" and sold_price) or (key == "shipping" and shipping):
+                        continue
+                    crop = detail_image.crop((int(width*x1), y1, int(width*x2), y2))
+                    crop = crop.resize((crop.width*3, crop.height*3))
+                    value, detected_ccy = _price(pytesseract.image_to_string(crop, config="--psm 7"))
+                    if key == "sold" and value:
+                        sold_price, currency = value, detected_ccy
+                    elif key == "shipping" and value:
+                        shipping, shipping_currency = value, detected_ccy
+            except Exception:
+                pass
+        if currency and shipping_currency and currency != shipping_currency:
             shipping = ""
-        sold_matches = re.findall(r"\b\d{1,6}\b", sold_text)
-        sold = sold_matches[0] if sold_matches else ""
-        title_text = re.sub(r"\s+", " ", title_text).strip()
-        # Avoid exporting false positives based on a lone price token.
-        if len(title_text) < 8:
+        # Some OCR render ¥0 as ¥O; explicitly normalize zero only.
+        if not shipping and re.search(r"[¥￥]\s*[Oo]\b", primary_text(.54, .65)):
+            shipping = "0"
+        if not sold_price and re.search(r"[¥￥]\s*[Oo]\b", primary_text(.44, .53)):
+            sold_price, currency = "0", "JPY"
+        # Reject headers, toolbar and accidental scraps.
+        if len(title) < 10 or not re.search(r"[A-Za-z]{2,}", title):
             continue
-        rows.append({"sku": f"OCR-{len(rows)+1:03d}", "ebay_query": "", "title": title_text,
-                     "average_sold_price": price, "currency": ccy, "average_shipping": shipping,
-                     "total_sold": sold, "source_image": filename, "review_status": "要確認"})
-    return rows
-
+        extracted.append({
+            "sku": f"OCR-{len(extracted)+1:03d}", "ebay_query": "", "title": title,
+            "average_sold_price": sold_price, "currency": currency,
+            "average_shipping": shipping, "total_sold": units,
+            "source_image": filename, "review_status": "要確認",
+        })
+    return extracted
 
 def parse_screenshot(content: bytes, filename: str) -> tuple[list[dict], str]:
     words = ocr_tokens(content)
-    rows = extract_rows(words, filename)
+    rows = extract_rows(words, filename, content)
     raw = _text(words)
     return rows, raw
 
