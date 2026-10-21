@@ -188,6 +188,41 @@ if keyword_lines:
     st.download_button(tr("仕入れ候補CSVを保存（価格未入力）", "Download candidate CSV (prices blank)"), pd.DataFrame(candidate_rows).to_csv(index=False).encode('utf-8-sig'), file_name='keyword_candidate_template.csv', mime='text/csv')
     st.caption(tr("テラピークで成約相場を調べ、CSVに仕入れ価格・希望売価・梱包情報を入力してから、次の欄にアップロードしてください。", "Check sold prices in Product Research, fill in purchase/target prices and shipping details, then upload the CSV below."))
 
+# Screenshot OCR is deliberately separate from the sales reference CSV importer:
+# row-level Product Research screenshots may contain averages and summaries, not
+# single transaction records. Users review and optionally download OCR rows.
+st.subheader(tr("0.5 テラピークのスクショ → CSV", "0.5 Terapeak screenshots → CSV"))
+st.caption(tr("テラピークの結果一覧が映ったPNG/JPG画像を複数枚まとめてアップロード（枚数・CSV行数の固定上限なし）。商品名・平均成約価格・平均送料・販売数をOCRで読み取り、確認後にCSVへ保存します。画像によっては抽出できません。", "Upload multiple PNG/JPG screenshots (no fixed image or CSV row count limit) of the Product Research results table. OCR attempts titles, average sold price, average shipping and units sold. Review all fields before exporting."))
+screenshot_files = st.file_uploader(tr("スクリーンショットを選択（PNG/JPG）", "Choose screenshot images (PNG/JPG)"), type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="terapeak_screenshots")
+if screenshot_files:
+    from terapeak_ocr import parse_screenshot, OUTPUT_COLUMNS, OCRUnavailable
+    extracted_rows, raw_parts = [], []
+    for screenshot_file in screenshot_files:
+        if screenshot_file.size > 10 * 1024 * 1024:
+            st.warning(f"{screenshot_file.name}: 10MBを超えるためスキップ")
+            continue
+        try:
+            found, raw = parse_screenshot(screenshot_file.getvalue(), screenshot_file.name)
+            extracted_rows.extend(found)
+            raw_parts.append(f"### {screenshot_file.name}\n{raw}")
+        except (ValueError, OCRUnavailable) as exc:
+            st.warning(f"{screenshot_file.name}: {exc}")
+    if extracted_rows:
+        st.info(tr(f"読み取り候補：{len(extracted_rows)}件（出力件数の上限なし）。重複や誤認識を確認してからCSVに保存してください。", f"Extracted {len(extracted_rows)} candidate rows (no export row limit). Review duplicates and OCR mistakes before saving."))
+        for i, row in enumerate(extracted_rows, 1):
+            row["sku"] = f"OCR-{i:03d}"
+        st.warning(tr("OCRの価格・販売件数は誤認識の可能性があります。通貨も含め、画像と照合してから保存してください。これはeBay公式データの直接取得ではありません。", "OCR may misread prices, counts and currency. Compare each cell with the screenshots. This is not direct eBay data retrieval."))
+        reviewed = st.data_editor(pd.DataFrame(extracted_rows, columns=OUTPUT_COLUMNS), num_rows="dynamic", use_container_width=True, key="terapeak_ocr_editor")
+        st.download_button(tr("確認したテラピーク結果をCSVで保存", "Download reviewed Terapeak CSV"),
+                           reviewed.to_csv(index=False).encode("utf-8-sig"), file_name="terapeak_screenshot_ocr.csv", mime="text/csv")
+    else:
+        st.info(tr("一覧表を自動抽出できませんでした。テラピークの『Listing / Avg sold price / Total sold』列が映るように撮り直してください。OCR全文を確認することもできます。", "No table rows detected. Include the Listing / Avg sold price / Total sold columns, or review the raw OCR text."))
+    if raw_parts:
+        with st.expander(tr("OCRで読み取った全文（誤認識あり）", "Raw OCR text (may contain errors)")):
+            st.text_area("OCR", value="\n\n".join(raw_parts), height=250)
+            st.download_button(tr("OCR全文をテキスト保存", "Download raw OCR text"), "\n\n".join(raw_parts).encode("utf-8"), file_name="terapeak_raw_ocr.txt", mime="text/plain")
+st.caption(tr("※このCSVは画像から読んだ表形式の参考データです。次の『成約参考CSV』とは列が異なるため、そのままは読み込めません。必要に応じてSKUと reference_sold_price_usd 等に整理してください。", "Screenshot CSV is a standalone reference table; it is not directly compatible with the optional sold-data CSV importer below. Convert columns and assign SKU if needed."))
+
 st.subheader(tr("1. ファイルを読み込む", "1. Upload product data"))
 left, right = st.columns(2)
 with left:
