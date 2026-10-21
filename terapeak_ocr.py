@@ -6,6 +6,7 @@ Do not treat OCR estimates as validated sold transaction records.
 from __future__ import annotations
 import io
 import re
+from collections import defaultdict
 
 import pandas as pd
 from PIL import Image, ImageOps
@@ -31,8 +32,8 @@ def ocr_tokens(image_bytes: bytes) -> pd.DataFrame:
     if image.width * image.height > 22_000_000:
         raise ValueError("画像が大きすぎます。画面を分割するか縮小してください")
     image = ImageOps.autocontrast(image.convert("L"))
-    if image.width < 1200:
-        ratio = min(2.0, 1400 / image.width)
+    if image.width < 1800:
+        ratio = min(3.0, 2048 / image.width)
         image = image.resize((int(image.width * ratio), int(image.height * ratio)))
     try:
         words = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME, config="--psm 11")
@@ -44,6 +45,7 @@ def ocr_tokens(image_bytes: bytes) -> pd.DataFrame:
     words["cx"] = words["left"] + words["width"] / 2
     words["cy"] = words["top"] + words["height"] / 2
     words.attrs["width"] = image.width
+    words.attrs["height"] = image.height
     return words
 
 
@@ -53,6 +55,10 @@ def _text(words: pd.DataFrame) -> str:
 
 def _price(text: str):
     # Product Research may show USD, JPY, GBP, EUR etc. Never infer USD from a bare number.
+    # In small currency cells Tesseract commonly confuses digit 1 with l/I/|.
+    # Only normalize the number immediately following an explicit currency sign.
+    text = re.sub(r"((?:US\s*\$|\$|¥|￥|£|€)\s*)([\dIl|,]+(?:\.[\dIl|]{1,2})?)",
+                  lambda m: m.group(1) + m.group(2).translate(str.maketrans("Il|", "111")), text)
     m = re.search(r"(US\s*\$|\$|¥|￥|£|€)\s*([\d,]+(?:\.\d{1,2})?)", text)
     if not m:
         return "", ""
@@ -84,12 +90,32 @@ def extract_rows(words: pd.DataFrame, filename: str, image_bytes: bytes | None =
         if not nearby.empty and width * .40 < token["cx"] < width * .58:
             anchors.append(float(token["cy"]))
     anchors = sorted(set(round(y) for y in anchors))
+    # Different browser zoom levels can omit either word in "Fixed price".
+    # The numeric sold-price cell sits directly above that label in the
+    # 44%-54% band. Accept the detected label alone when it occurs in a
+    # repeated vertical run of at least two rows; never parse browser chrome.
+    if len(anchors) < 2:
+        loose = [round(float(t.cy)) for _, t in fixed.iterrows()
+                 if width * .40 < t.cx < width * .58]
+        anchors = sorted(set(loose)) if len(loose) >= 2 else anchors
+    if len(anchors) < 2:
+        loose = [round(float(t.cy)) for _, t in price_label.iterrows()
+                 if width * .40 < t.cx < width * .58]
+        anchors = sorted(set(loose)) if len(loose) >= 2 else anchors
+    # Eliminate accidental toolbar matches not forming a listing-row sequence.
+    if len(anchors) > 2:
+        gaps = [b-a for a,b in zip(anchors, anchors[1:]) if b-a >= 35]
+        if gaps:
+            median_gap = sorted(gaps)[len(gaps)//2]
+            anchors = [y for i,y in enumerate(anchors) if
+                       (i > 0 and abs(y-anchors[i-1]-median_gap) < median_gap*.48) or
+                       (i+1 < len(anchors) and abs(anchors[i+1]-y-median_gap) < median_gap*.48)]
     extracted = []
     detail_image = None
     if image_bytes is not None:
         detail_image = ImageOps.autocontrast(Image.open(io.BytesIO(image_bytes)).convert("L"))
-        if detail_image.width < 1200:
-            ratio = min(2.0, 1400 / detail_image.width)
+        if detail_image.width < 1800:
+            ratio = min(3.0, 2048 / detail_image.width)
             detail_image = detail_image.resize((int(detail_image.width * ratio), int(detail_image.height * ratio)))
     for i, anchor in enumerate(anchors):
         previous_gap = anchor - anchors[i - 1] if i else None
@@ -104,7 +130,16 @@ def extract_rows(words: pd.DataFrame, filename: str, image_bytes: bytes | None =
         title_words = col(.075, .325)
         # Exclude sub-labels and small UI artifacts accidentally caught in the band.
         title_words = title_words[~title_words["text"].str.lower().isin(["edit", "fixed", "price"])]
-        title = _text(title_words)
+        # OCR tokens at the same visual line can have slightly different top
+        # coordinates. Cluster into visual lines before joining left-to-right.
+        title_lines = []
+        for _, tok in title_words.sort_values(["cy", "left"]).iterrows():
+            match = next((line for line in title_lines if abs(line["cy"]-tok.cy) < max(8, width*.004)), None)
+            if match is None:
+                match = {"cy": float(tok.cy), "items": []}
+                title_lines.append(match)
+            match["items"].append((float(tok.left), str(tok.text)))
+        title = " ".join(" ".join(t for _,t in sorted(line["items"])) for line in sorted(title_lines, key=lambda r:r["cy"]))
         title = re.sub(r"\s+", " ", title).strip()
         # Monetary cells: isolate the primary line above the 'Fixed price' anchor.
         primary = band[(band["cy"] < anchor - 5) & (band["cy"] > anchor - max(35, typical_gap * .42))]
@@ -132,7 +167,7 @@ def extract_rows(words: pd.DataFrame, filename: str, image_bytes: bytes | None =
         # Some currency cells are missed by whole-page OCR. Retry each cropped
         # price cell independently. Accept only values with an explicit symbol;
         # never turn arbitrary numbers into prices.
-        if detail_image is not None and (not sold_price or not shipping):
+        if detail_image is not None and (not sold_price or not shipping or len(str(sold_price)) < 3 or len(str(shipping)) < 3):
             try:
                 import pytesseract
                 y1, y2 = max(0, int(anchor - 45)), min(detail_image.height, int(anchor - 8))
@@ -141,10 +176,10 @@ def extract_rows(words: pd.DataFrame, filename: str, image_bytes: bytes | None =
                         continue
                     crop = detail_image.crop((int(width*x1), y1, int(width*x2), y2))
                     crop = crop.resize((crop.width*3, crop.height*3))
-                    value, detected_ccy = _price(pytesseract.image_to_string(crop, config="--psm 7"))
-                    if key == "sold" and value:
+                    value, detected_ccy = _price(pytesseract.image_to_string(crop, config="--psm 6"))
+                    if key == "sold" and value and (not sold_price or len(value) > len(str(sold_price))):
                         sold_price, currency = value, detected_ccy
-                    elif key == "shipping" and value:
+                    elif key == "shipping" and value and (not shipping or len(value) > len(str(shipping))):
                         shipping, shipping_currency = value, detected_ccy
             except Exception:
                 pass
@@ -166,10 +201,20 @@ def extract_rows(words: pd.DataFrame, filename: str, image_bytes: bytes | None =
         })
     return extracted
 
+def _normalise_image(content: bytes) -> Image.Image:
+    image = Image.open(io.BytesIO(content)).convert("RGB")
+    # Browser chrome at the top is irrelevant; keep screen dimensions stable
+    # because extract_rows uses relative horizontal column coordinates.
+    return image
+
 def parse_screenshot(content: bytes, filename: str) -> tuple[list[dict], str]:
     words = ocr_tokens(content)
     rows = extract_rows(words, filename, content)
-    raw = _text(words)
+    # Keep the raw OCR useful: skip the browser tab/address area above the
+    # result table. The structured extraction still uses original positions.
+    height = float(words.attrs.get("height", 1))
+    content = words[words["cy"] >= max(70, height * 0.12)]
+    raw = _text(content)
     return rows, raw
 
 

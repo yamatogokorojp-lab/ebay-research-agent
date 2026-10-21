@@ -194,7 +194,7 @@ if suggestions:
 # Screenshot OCR is deliberately separate from the sales reference CSV importer:
 # row-level Product Research screenshots may contain averages and summaries, not
 # single transaction records. Users review and optionally download OCR rows.
-st.subheader(tr("0.2 テラピークのスクショ → CSV", "0.2 Terapeak screenshots → CSV"))
+st.subheader(tr("0.2 テラピークのスクショ → CSV【表の位置認識 v2】", "0.2 Terapeak screenshots → CSV [table-aware v2]"))
 st.caption(tr("テラピークの結果一覧が映ったPNG/JPG画像を複数枚まとめてアップロード（枚数・CSV行数の固定上限なし）。商品名・平均成約価格・平均送料・販売数をOCRで読み取り、確認後にCSVへ保存します。画像によっては抽出できません。", "Upload multiple PNG/JPG screenshots (no fixed image or CSV row count limit) of the Product Research results table. OCR attempts titles, average sold price, average shipping and units sold. Review all fields before exporting."))
 screenshot_files = st.file_uploader(tr("スクリーンショットを選択（PNG/JPG）", "Choose screenshot images (PNG/JPG)"), type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="terapeak_screenshots")
 if screenshot_files:
@@ -210,6 +210,18 @@ if screenshot_files:
             raw_parts.append(f"### {screenshot_file.name}\n{raw}")
         except (ValueError, OCRUnavailable) as exc:
             st.warning(f"{screenshot_file.name}: {exc}")
+    # A scroll may overlap adjacent screenshots. Remove only exact normalized
+    # title/price/quantity matches; avoid merging different actual listings.
+    seen_rows, unique_rows = set(), []
+    for item in extracted_rows:
+        key = (" ".join(str(item.get("title", "")).casefold().split()),
+               str(item.get("average_sold_price", "")),
+               str(item.get("average_shipping", "")),
+               str(item.get("total_sold", "")))
+        if key not in seen_rows:
+            seen_rows.add(key)
+            unique_rows.append(item)
+    extracted_rows = unique_rows
     if extracted_rows:
         st.info(tr(f"読み取り候補：{len(extracted_rows)}件（出力件数の上限なし）。重複や誤認識を確認してからCSVに保存してください。", f"Extracted {len(extracted_rows)} candidate rows (no export row limit). Review duplicates and OCR mistakes before saving."))
         for i, row in enumerate(extracted_rows, 1):
