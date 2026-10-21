@@ -214,3 +214,10 @@ eBay現行出品を探すだけでは「売れている」証拠にはならな�
 - Product Research's per-listing `total_sold` is preserved only as a note; it is not mistaken for a 90-day market-wide sold count.
 - Sourcing prices, verified stock, shipping costs and origin remain blank until actually established. Incomplete costs must never produce a confirmed profit.
 - The original sourcing CSV format and optional sold-reference CSV importer remain supported.
+
+
+## EMS送料比較・画面整理（追加）
+- 元の「3. テラピーク確認」「3.5 カテゴリー手動確認」「4. 利益ランキング」の画面セクションは削除。テラピークの専用リンクは画面上部に引き続き設置。
+- 商品詳細欄の利益計算と経費内訳は維持。
+- EMSは日本郵便公式の米国宛て料金を確認し、max_weight_g,price_jpy のCSVに記載してアップロードすると、梱包重量で該当料金を参照できます。料金の数値を捏造しないため空テンプレートです。EMS取扱可能性はチェックボックスで明示確認してください。
+- 仕入れ価格・正しいEMS運賃・梱包サイズ・割増金が未入力なら正確な利益は確定できません。

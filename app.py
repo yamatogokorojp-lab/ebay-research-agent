@@ -17,6 +17,7 @@ from engine import Settings, evaluate_all, number, yes
 from fx import usd_jpy_rate, FxError
 from sourcing_api import rakuten_search, yahoo_search, match_model, search_links, SourcingApiError
 from rates_us import quote_us_all, shipping_base
+from ems_rates import parse_ems_rate_csv, lookup_ems_rate, EMSRateError
 from fee_updates import fetch_verified_fees, FeeUpdateError
 from category_fees import (validate_schedule, category_rate, CategoryFeeError,
                            reconcile_category_context, category_choice_is_current)
@@ -424,8 +425,40 @@ for src in source_rows:
             src['domestic_shipping_jpy'] = str(confirmed['shipping_jpy'])
         src['_purchase_api_checked'] = True
 
+st.subheader(tr("EMS送料を追加・比較", "Add and compare EMS postage"))
+st.caption(tr("日本郵便の公式EMS料金表から確認した米国向け重量別料金をCSVで取り込みます。最新料金を自動取得したとはみなしません。", "Upload US-bound EMS weight-band rates verified against Japan Post. No live EMS tariff is claimed."))
+st.markdown("[日本郵便・EMS公式料金案内](https://www.post.japanpost.jp/send/oversea/charge/)")
+example_ems_csv = "max_weight_g,price_jpy\n"  # do not invent official EMS prices
+st.download_button("EMS料金CSVの空テンプレート", example_ems_csv.encode("utf-8-sig"), "ems_us_rate_template.csv", "text/csv")
+ems_file = st.file_uploader("確認済みEMS料金CSV（max_weight_g, price_jpy）", type=["csv"], key="ems_tariff_upload")
+ems_rates = []
+if ems_file:
+    try:
+        ems_rates = parse_ems_rate_csv(ems_file.getvalue())
+        st.success(f"EMS料金を{len(ems_rates)}重量帯読み込みました（入力された料金表の値です）。")
+    except EMSRateError as exc:
+        st.error(f"EMS料金CSVを読み込めません: {exc}")
+
+# EMS eligibility requires shipment-specific checks (destination, contents,
+# batteries, size and current Japan Post restrictions). Never silently mark
+# every OCR-derived item eligible.
+ems_confirmed = st.checkbox("EMS発送条件を確認済みの商品だけを比較に含める", value=False,
+                            help="米国宛て・商品内容・電池・サイズなどの郵便条件を確認してください。")
+if ems_rates and ems_confirmed:
+    ems_matched = 0
+    for src in source_rows:
+        w = number(src.get('packed_weight_g'))
+        price = lookup_ems_rate(ems_rates, w)
+        if price is not None:
+            src['ems_shipping_jpy'] = str(price)
+            src['ems_eligible'] = 'yes'
+            ems_matched += 1
+    st.info(f"梱包重量が入力済みの{ems_matched}商品にEMS基本運賃を適用しました。実際の取扱可否と追加費用は要確認です。")
+elif not ems_rates:
+    st.info("公式料金を確認してCSVに入力すると、重量に応じてEMSも利益・配送比較の候補になります。既存CSVのEMS送料入力も引き続き利用できます。")
+
 st.subheader(tr("PDF料金表：米国向け基本送料を比較", "Compare US base shipping rates from PDFs"))
-st.caption('2026年版の4種類のPDFに記載された基本運賃。燃油・混雑期・関税・通関費用等を含みません。EMSは日本郵便公式料金ページから別途確認してください。')
+st.caption('2026年版の4種類のPDFに記載された基本運賃。燃油・混雑期・関税・通関費用等を含みません。EMSは確認済みCSV・個別見積を使用し、基本運賃を比較してください。')
 if quote_includes:
     st.warning('全項目込み送料モード中はPDFの基本送料を利益計算へ自動採用しません。CSVに全項目込み金額を入れてください。')
 shipping_weight = number(chosen_row.get('packed_weight_g'))
@@ -433,6 +466,15 @@ if shipping_weight and shipping_weight > 0:
     shipping_dims = tuple(number(chosen_row.get(k)) for k in ('packed_length_cm','packed_width_cm','packed_height_cm'))
     base_quotes = quote_us_all(shipping_weight, shipping_dims, yes(chosen_row.get('has_battery')), fedex_zone)
     if base_quotes:
+        # Add EMS alongside the PDF-derived service rates when its official tariff
+        # has been user-verified and the shipment is confirmed eligible.
+        ems_price = number(chosen_row.get('ems_shipping_jpy'))
+        if ems_rates and ems_confirmed:
+            ems_price = lookup_ems_rate(ems_rates, shipping_weight)
+        if ems_price and (ems_confirmed or yes(chosen_row.get('ems_eligible'))):
+            base_quotes.append({'service':'EMS','zone':'US','billable_kg':shipping_weight/1000,'bracket_kg':None,
+                                'base_jpy':ems_price,'note':'発送条件確認済み／追加費用別確認',
+                                'source':'利用者が確認・入力したEMS料金','page':'—'})
         st.dataframe(pd.DataFrame(base_quotes)[['service','zone','billable_kg','bracket_kg','base_jpy','note','source','page']],use_container_width=True,hide_index=True)
         st.caption('FedExの地域未指定時は両地域を参考表示するだけで利益計算へ自動採用しません。サイズ・危険物・配達可能地域は要確認。')
 else:
@@ -443,85 +485,10 @@ if "live_market" not in st.session_state:
     st.session_state.live_market = {}
 
 sales_map = {str(r.get("sku", "")).strip(): r for r in sales_rows}
-st.subheader(tr("3. テラピークで成約相場を確認（API不要）", "3. Open Product Research (Terapeak) (no API)"))
-st.caption(tr("テラピークを開いて検索語を手入力してください。成約履歴・販売件数は自動取得しません。", "Open Product Research and enter a search term manually. Sold listing data and counts are not automatically fetched."))
-eb_link_rows=[]
-for src in source_rows[:50]:
-    sku = str(src.get('sku','')).strip()
-    matching = sales_map.get(sku, {})
-    query = (matching.get('ebay_query') or src.get('ebay_query') or
-             ' '.join(x for x in (src.get('brand', ''), src.get('model', '')) if x).strip() or src.get('title', ''))
-    eb_link_rows.append({'SKU':sku,'商品名':src.get('title',''),'テラピークURL':'https://www.ebay.com/sh/research','検索語':str(query)})
-if eb_link_rows:
-    st.dataframe(pd.DataFrame(eb_link_rows), use_container_width=True, hide_index=True,
-                 column_config={'テラピークURL': st.column_config.LinkColumn('テラピークを開く')})
-
-st.subheader(tr("3.5. eBayカテゴリー手動確認・カテゴリー別販売手数料", "3.5. Manual category checks and category-specific fees"))
-st.caption("eBay APIは使用しません。eBayサイト上で正しいカテゴリーIDを確認し、CSVのカテゴリー情報や自己確認済み料率表を管理してください。未確認のIDやカテゴリー別料率を自動で決めません。")
-if "category_suggestions" not in st.session_state:
-    st.session_state.category_suggestions = {}
-if "category_choices" not in st.session_state:
-    st.session_state.category_choices = {}
-if "category_fingerprints" not in st.session_state:
-    st.session_state.category_fingerprints = {}
-invalidated = reconcile_category_context(
-    source_rows, st.session_state.category_fingerprints,
-    st.session_state.category_suggestions, st.session_state.category_choices,
-)
-for changed_sku in invalidated:
-    # A Streamlit text_input key survives changes to its default value.
-    st.session_state.pop(f'category_query_{changed_sku}', None)
-    st.session_state.pop(f'cat_choice_{changed_sku}', None)
-if invalidated:
-    st.info('商品名・ブランド・型番の変更、またはSKU削除を検出したため、以前のカテゴリー選択を無効にしました。')
-
-store_plan = st.text_input("eBayストア契約区分（例: no_store。料率表の契約区分と一致させる）", value="no_store")
-fee_json = st.file_uploader("eBay公式手数料表を確認して登録したJSON（任意）", type=['json'], key='ebay_fee_table')
-category_fee_schedule = None
-if fee_json:
-    try:
-        import json
-        category_fee_schedule = validate_schedule(json.loads(fee_json.getvalue().decode('utf-8-sig')))
-        if category_fee_schedule['store_plan'] != store_plan:
-            st.warning('登録した料金表とストア契約区分が一致しません。共通20%仮定を使用します。')
-            category_fee_schedule = None
-        else:
-            st.info(f"自己確認済み料金表: {len(category_fee_schedule['rates'])}カテゴリー / 期限 {category_fee_schedule['effective_to']}。正式なeBay請求額を保証するものではありません。")
-    except (CategoryFeeError, UnicodeError, ValueError) as ex:
-        st.warning(f'カテゴリー別の手数料表は使用できません: {ex}')
-
-category_label_map = {f"{r['sku']} | {r['title']}": r for r in source_rows}
-category_label = st.selectbox('カテゴリーを検索する商品', list(category_label_map), key='category_search_select')
-category_row = category_label_map[category_label]
-category_sku = str(category_row['sku']).strip()
-category_query = st.text_input('カテゴリー検索用の商品名', value=str(category_row.get('title', '')), key=f'category_query_{category_sku}')
-selected_for_query = st.session_state.category_choices.get(category_sku)
-if selected_for_query and not category_choice_is_current(
-    selected_for_query, category_query, st.session_state.category_fingerprints[category_sku]
-):
-    st.session_state.category_choices.pop(category_sku, None)
-st.markdown(f"[eBayで商品名を検索してカテゴリーを確認する](https://www.ebay.com/sch/i.html?_nkw={url_quote(str(category_query or ""), safe="")})")
-st.info('APIなしモードではカテゴリー候補の自動取得は無効です。手数料の計算には検証済み料率表または共通の仮定値を使用します。')
-
-for row in source_rows:
-    sku = str(row.get('sku','')).strip()
-    # Never trust a CSV-provided internal override as verification.
-    row.pop('_verified_fee_pct', None)
-    row.pop('_selected_category_id', None)
-    row.pop('_selected_category_name', None)
-    selected = st.session_state.category_choices.get(sku)
-    query_used = str(st.session_state.get(f'category_query_{sku}', row.get('title', '')))
-    if not category_choice_is_current(selected, query_used, st.session_state.category_fingerprints[sku]):
-        st.session_state.category_choices.pop(sku, None)
-        selected = None
-    if selected:
-        row['_selected_category_id'] = selected['category_id']
-        row['_selected_category_name'] = selected['name']
-        rate = category_rate(category_fee_schedule, selected['category_id'], store_plan)
-        if rate is not None:
-            row['_verified_fee_pct'] = rate
-
-st.caption('料率表の公式自動更新は未実装です。登録したJSONは出品者による自己確認を前提とします。eBayの契約・注文総額の算定基準・段階料率を確認できない場合、20%の仮計算です。')
+# Previous sections 3 and 3.5 were removed by request; no redundant
+# Terapeak link or mandatory category/model input is shown here.
+# Category-specific fees can still be supplied in the original CSV; the
+# engine conservatively uses the shared fee estimate unless verified.
 
 results = evaluate_all(source_rows, sales_rows, st.session_state.live_market, settings)
 rows = []
@@ -541,27 +508,10 @@ for item in results:
         "仕入れ価格状態": "APIで在庫確認・送料は要確認" if original.get('_purchase_api_checked') else "CSV値/未確認",
     })
 
-st.subheader(tr("4. リサーチ結果と利益ランキング", "4. Research results & profit ranking"))
-profitable = sum(r["status"] == "目標達成" for r in results)
-positive = sum(r["profit_jpy"] is not None and r["profit_jpy"] > 0 for r in results)
-t1, t2, t3 = st.columns(3)
-t1.metric("商品候補", f"{len(results)}件")
-t2.metric(f"目標利益率 {target:g}% 達成", f"{profitable}件")
-t3.metric("黒字見込み", f"{positive}件")
-frame = pd.DataFrame(rows)
-if not frame.empty:
-    frame = frame.sort_values(by=["利益円", "利益率%"], ascending=False, na_position="last")
-    st.dataframe(frame, use_container_width=True, hide_index=True, column_config={
-        "仕入れURL": st.column_config.LinkColumn("仕入れURL"),
-        "利益率%": st.column_config.NumberColumn("利益率%", format="%.2f"),
-        "利益円": st.column_config.NumberColumn("利益円", format="¥%d"),
-    })
-    out = io.StringIO()
-    frame.to_csv(out, index=False)
-    st.download_button(tr("ランキング結果をCSV保存", "Export ranking CSV"), out.getvalue().encode("utf-8-sig"),
-                       file_name="ebay_research_results.csv", mime="text/csv", type="primary")
+# Former ranking section 4 removed by request. The evaluated results remain
+# available to the per-product details UI below.
 
-st.subheader(tr("5. 商品ごとの詳細・仕入れ検索", "5. Product details and sourcing links"))
+st.subheader(tr("商品ごとの詳細・仕入れ検索・利益計算", "Product details, sourcing and profit calculator"))
 if not results:
     st.stop()
 choices = {f"{item['sku']} | {item['title']}": item for item in results}
@@ -579,7 +529,7 @@ with st.container(border=True):
         with st.expander("利益の内訳を表示"):
             st.json(item["breakdown"], expanded=True)
     if item["shipping_options"]:
-        st.write("**配送方法の見積比較（入力された料金のみ）**")
+        st.write("**配送方法の見積比較（確認済み入力のある方法のみ：SpeedPAK・FedEx・DHL・EMS）**")
         st.dataframe(pd.DataFrame(item["shipping_options"]), use_container_width=True, hide_index=True)
     st.write(f"**推奨配送ポリシー候補:** {item['policy']}")
     if item["volume_weight_g_div5000"] is not None:
@@ -599,7 +549,7 @@ with st.container(border=True):
         st.markdown(f"[登録済みの仕入れ元URLを開く]({item['source_url']})")
     st.caption("これらは検索リンクです。表示価格・在庫・同一型番を自動確認した結果ではありません。")
 
-st.subheader(tr("6. AIによる仕入れ判断（任意）", "6. AI sourcing opinion (optional)"))
+st.subheader(tr("AIによる仕入れ判断（任意）", "AI sourcing opinion (optional)"))
 st.caption("AIに送るのは選択中の商品・数値・注意事項です。AIは未確認の市場情報を補完できません。OpenAI APIはChatGPTと別課金です。")
 if st.button("選択した商品をAI分析", disabled=not bool(os.getenv("OPENAI_API_KEY")) or os.getenv("ENABLE_PUBLIC_AI", "false").lower() != "true"):
     require_api_budget()
@@ -613,4 +563,4 @@ if not os.getenv("OPENAI_API_KEY"):
     st.info("AI分析を有効にする場合は、.env の OPENAI_API_KEY を設定して画面を再起動してください。")
 
 st.divider()
-st.caption("免責：PDF送料は基本運賃であり、追加料金ゼロは未確認を意味します。API在庫は取得時点の情報で実際の仕入れ可能性を保証しません。数値は意思決定の試算です。eBay実手数料、広告、関税・原産国、梱包サイズ、送料、消費税、実際の輸入通関費用を個別に確認してください。消費税還付は計算に加算していません。")
+st.caption("免責：EMS料金は利用者が確認して入力した基本運賃であり、現在の公式料金をアプリが自動検証したものではありません。発送条件・国別制限も別途確認してください。PDF送料は基本運賃であり、追加料金ゼロは未確認を意味します。API在庫は取得時点の情報で実際の仕入れ可能性を保証しません。数値は意思決定の試算です。eBay実手数料、広告、関税・原産国、梱包サイズ、送料、消費税、実際の輸入通関費用を個別に確認してください。消費税還付は計算に加算していません。")
