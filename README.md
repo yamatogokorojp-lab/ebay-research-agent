@@ -188,3 +188,13 @@ eBay現行出品を探すだけでは「売れている」証拠にはならな�
 - アプリの先頭とCSVの各商品に公式Seller Hub Product Researchへのリンク（https://www.ebay.com/sh/research）を表示します。ログインが必要な場合があります。
 - 商品名はリンク先に自動入力されません。アプリの検索語をコピーしProduct Research内で検索してください。
 - 成約データは自動取得せず、参考成約単価や販売件数はCSVで手動入力してください。
+
+## 2026-10-21 UI update
+- 0: Offline English keyword suggestion generation (not verified sold-data analytics), copy-all code block.
+- 0.1: Single Product Research (Terapeak) link, with no eBay API authentication.
+- 0.2: Multi-screenshot OCR to CSV with no fixed output row cap, plus USD-converted price and shipping columns using the displayed USD/JPY rate. Original amounts and original currency are retained. USD already in screenshots remains USD; non-JPY/non-USD values are left unconverted rather than guessed.
+- Other sourcing/shipping/profit/CSV sections retained. Automatic FX may be unavailable, in which case the sidebar manual assumption applies. OCR results may require review; this is not a guarantee of full automatic extraction.
+
+
+### 2026-10-21 修正：カテゴリー検索 TypeError
+送料見積の変数名が urllib.parse.quote を上書きする不具合を修正。カテゴリー検索と仕入れ先検索リンクのURLエンコードは url_quote に統一しました。

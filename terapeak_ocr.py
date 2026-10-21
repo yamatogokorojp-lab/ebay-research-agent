@@ -113,3 +113,28 @@ def parse_screenshot(content: bytes, filename: str) -> tuple[list[dict], str]:
     rows = extract_rows(words, filename)
     raw = _text(words)
     return rows, raw
+
+
+def add_usd_conversions(frame: pd.DataFrame, usd_jpy: float) -> pd.DataFrame:
+    """Convert JPY screenshot prices to USD, preserve originals; never guess other FX pairs."""
+    if not (50 < float(usd_jpy) < 350):
+        raise ValueError("USD/JPY rate out of accepted range")
+    result = frame.copy()
+    def convert(row, key):
+        value = str(row.get(key, "")).replace(",", "").strip()
+        currency = str(row.get("currency", "")).strip().upper()
+        if not value or value.lower() in ("nan", "none"):
+            return ""
+        try:
+            amount = float(value)
+        except ValueError:
+            return ""
+        if currency == "USD":
+            return round(amount, 2)
+        if currency == "JPY":
+            return round(amount / float(usd_jpy), 2)
+        return ""
+    result["average_sold_price_usd"] = result.apply(lambda row: convert(row, "average_sold_price"), axis=1)
+    result["average_shipping_usd"] = result.apply(lambda row: convert(row, "average_shipping"), axis=1)
+    result["usd_jpy_rate_used"] = round(float(usd_jpy), 4)
+    return result
