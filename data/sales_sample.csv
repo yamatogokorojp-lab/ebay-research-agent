@@ -1,0 +1,4 @@
+sku,ebay_query,reference_sold_price_usd,sold_count_90d,active_count_reference,notes
+DEMO001,SEIKO SND379P1,139.99,7,23,デモ数値。実際の成約データではありません
+DEMO002,SONY RM-DR1J,74.99,12,14,デモ数値。実際の成約データではありません
+DEMO003,Nike Golf Club Driver,179.99,4,41,デモ数値。実際の成約データではありません

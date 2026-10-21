@@ -1,0 +1,4 @@
+sku,title,brand,model,source,source_url,purchase_jpy,domestic_shipping_jpy,packed_weight_g,packed_length_cm,packed_width_cm,packed_height_cm,economy_shipping_jpy,fedex_shipping_jpy,dhl_shipping_jpy,ems_shipping_jpy,ems_eligible,has_battery,country_of_origin,target_price_usd,category_fee_pct,extra_fees_jpy,ebay_query
+DEMO001,SEIKO SND379P1 Chronograph Watch,SEIKO,SND379P1,デモ（仕入未確認）,,13500,0,320,18,14,10,3900,7200,7600,,no,yes,未確認,135.99,13.25,0,SEIKO SND379P1
+DEMO002,SONY RM-DR1J Remote Control,SONY,RM-DR1J,デモ（仕入未確認）,,3000,0,250,20,12,7,3200,6100,6500,,no,no,未確認,69.99,13.25,0,SONY RM-DR1J
+DEMO003,Nike Golf Club Driver,Nike,Driver,デモ（仕入未確認）,,9500,700,1250,125,15,15,,12000,13600,10100,yes,no,未確認,175.99,13.25,0,Nike Golf Club Driver
