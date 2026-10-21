@@ -169,18 +169,24 @@ settings = Settings(fx_jpy_per_usd=fx, ebay_fee_pct=ebay_fee, ad_fee_pct=ad_fee,
                     other_shipping_surcharge_jpy=other_surcharge, economy_import_fee_jpy=economy_fee,
                     economy_duty_processing_pct=economy_processing_pct, method_fees=fee_rates)
 
-st.subheader(tr("0. eBay検索リンクと仕入れ候補CSVを作る（API不要）", "0. eBay search links and candidate CSV (no API)"))
-st.caption(tr("eBayの検索結果は公式サイトで確認します。成約数・売価・在庫は自動取得しません。候補CSVの仕入れ価格と希望売価は空欄です。", "Open eBay results on its website. Sold prices and listing data are not fetched automatically; candidate prices are blank."))
+st.subheader(tr("0. テラピークと仕入れ候補CSV（eBay API不要）", "0. Product Research (Terapeak) and candidate CSV (no eBay API)"))
+st.caption(tr("テラピーク（eBay Product Research）で成約実績を確認できます。eBayにログインして検索ワードを貼り付けてください。販売実績は自動取得しません。", "Open eBay Product Research (Terapeak), sign in, and paste the search terms. Sold data is not automatically fetched."))
 keyword_text = st.text_area(tr("検索ワード（1行1商品、最大20行）", "Search terms (one product per line, up to 20)"), value="SONY RM-DR1J\nSEIKO SND379P1", height=90)
 keyword_lines = [q.strip() for q in keyword_text.splitlines() if q.strip()][:20]
 if keyword_lines:
-    link_rows = [{"検索語 / Keyword": q, "eBay検索 / eBay search": "https://www.ebay.com/sch/i.html?_nkw=" + quote(q)} for q in keyword_lines]
-    st.dataframe(pd.DataFrame(link_rows), use_container_width=True, hide_index=True, column_config={"eBay検索 / eBay search": st.column_config.LinkColumn("eBay検索を開く")})
+    st.markdown(tr("**① 検索語をコピー → ② テラピークを開く → ③ 検索欄に貼り付け**", "**① Copy a term → ② Open Product Research → ③ Paste into its search box**"))
+    for index, q in enumerate(keyword_lines, start=1):
+        with st.container(border=True):
+            st.caption(f"{index}. {tr('検索ワード', 'Search term')}")
+            st.code(q, language=None)  # Streamlit's copy icon allows copying without an eBay API.
+            st.link_button(tr("テラピーク（Product Research）を開く ↗", "Open Terapeak (Product Research) ↗"),
+                           "https://www.ebay.com/sh/research")
+    st.caption(tr("検索ワードはeBay側へ自動送信されません。テラピークにログイン後、コピーした語を検索欄に貼り付けてください。", "The search term is not sent automatically. After sign-in, paste the copied term into Product Research."))
     candidate_rows = []
     for index, q in enumerate(keyword_lines, start=1):
         candidate_rows.append({"sku": f"RESEARCH-{index:03d}", "title": q, "brand": "", "model": "", "source": "", "source_url": "", "purchase_jpy": "", "domestic_shipping_jpy": "", "packed_weight_g": "", "packed_length_cm": "", "packed_width_cm": "", "packed_height_cm": "", "economy_shipping_jpy": "", "fedex_shipping_jpy": "", "dhl_shipping_jpy": "", "ems_shipping_jpy": "", "ems_eligible": "", "has_battery": "", "country_of_origin": "", "target_price_usd": "", "category_fee_pct": "", "extra_fees_jpy": "", "ebay_query": q})
     st.download_button(tr("仕入れ候補CSVを保存（価格未入力）", "Download candidate CSV (prices blank)"), pd.DataFrame(candidate_rows).to_csv(index=False).encode('utf-8-sig'), file_name='keyword_candidate_template.csv', mime='text/csv')
-    st.caption(tr("eBay検索で相場を調べ、CSVに仕入れ価格・希望売価・梱包情報を入力してから、次の欄にアップロードしてください。", "Check prices on eBay, fill in purchase/target prices and shipping details, then upload the CSV below."))
+    st.caption(tr("テラピークで成約相場を調べ、CSVに仕入れ価格・希望売価・梱包情報を入力してから、次の欄にアップロードしてください。", "Check sold prices in Product Research, fill in purchase/target prices and shipping details, then upload the CSV below."))
 
 st.subheader(tr("1. ファイルを読み込む", "1. Upload product data"))
 left, right = st.columns(2)
@@ -350,18 +356,18 @@ if "live_market" not in st.session_state:
     st.session_state.live_market = {}
 
 sales_map = {str(r.get("sku", "")).strip(): r for r in sales_rows}
-st.subheader(tr("3. eBay現行出品を公式サイトで確認（API不要）", "3. Open current eBay listings (no API)"))
-st.caption(tr("検索リンクのみ表示します。eBay現行価格・成約履歴・販売件数は自動取得しません。", "Search links only. eBay asking prices, sold listings and sales counts are not fetched."))
+st.subheader(tr("3. テラピークで成約相場を確認（API不要）", "3. Open Product Research (Terapeak) (no API)"))
+st.caption(tr("テラピークを開いて検索語を手入力してください。成約履歴・販売件数は自動取得しません。", "Open Product Research and enter a search term manually. Sold listing data and counts are not automatically fetched."))
 eb_link_rows=[]
 for src in source_rows[:50]:
     sku = str(src.get('sku','')).strip()
     matching = sales_map.get(sku, {})
     query = (matching.get('ebay_query') or src.get('ebay_query') or
              ' '.join(x for x in (src.get('brand', ''), src.get('model', '')) if x).strip() or src.get('title', ''))
-    eb_link_rows.append({'SKU':sku,'商品名':src.get('title',''),'eBay検索URL':'https://www.ebay.com/sch/i.html?_nkw='+quote(str(query))})
+    eb_link_rows.append({'SKU':sku,'商品名':src.get('title',''),'テラピークURL':'https://www.ebay.com/sh/research','検索語':str(query)})
 if eb_link_rows:
     st.dataframe(pd.DataFrame(eb_link_rows), use_container_width=True, hide_index=True,
-                 column_config={'eBay検索URL': st.column_config.LinkColumn('eBayで確認')})
+                 column_config={'テラピークURL': st.column_config.LinkColumn('テラピークを開く')})
 
 st.subheader(tr("3.5. eBayカテゴリー手動確認・カテゴリー別販売手数料", "3.5. Manual category checks and category-specific fees"))
 st.caption("eBay APIは使用しません。eBayサイト上で正しいカテゴリーIDを確認し、CSVのカテゴリー情報や自己確認済み料率表を管理してください。未確認のIDやカテゴリー別料率を自動で決めません。")
