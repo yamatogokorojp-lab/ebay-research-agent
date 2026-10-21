@@ -205,3 +205,12 @@ eBay現行出品を探すだけでは「売れている」証拠にはならな�
 - 撮影時はProduct Researchの結果表の全幅を表示してください。複数画像の重複行はタイトル・価格・送料・販売数が完全一致する場合だけ除外します。
 - スクリーンショット2枚で21行検出した検証がありますが、OCRは100%の精度を保証しません。値を推測して埋めず、ダウンロード前に画像と照合してください。
 - GitHubではZIP自体ではなく解凍したファイルをリポジトリのルートに上書きしてコミットし、Streamlitを再起動してください。見出し `表の位置認識 v2` で反映状況を確認できます。
+
+## Product Research CSV → sourcing integration (2026-10-22)
+
+- Screenshot OCR results directly feed the sourcing workflow when the checkbox is selected; no re-upload is necessary.
+- The sourcing uploader also accepts `terapeak_screenshot_ocr.csv` and detects its columns automatically.
+- A compatible sourcing item and sold-price reference share the same SKU. `average_sold_price_usd` is used as **reference** price, not as a verified sale of your own item.
+- Product Research's per-listing `total_sold` is preserved only as a note; it is not mistaken for a 90-day market-wide sold count.
+- Sourcing prices, verified stock, shipping costs and origin remain blank until actually established. Incomplete costs must never produce a confirmed profit.
+- The original sourcing CSV format and optional sold-reference CSV importer remain supported.

@@ -196,6 +196,7 @@ if suggestions:
 # single transaction records. Users review and optionally download OCR rows.
 st.subheader(tr("0.2 テラピークのスクショ → CSV【表の位置認識 v2】", "0.2 Terapeak screenshots → CSV [table-aware v2]"))
 st.caption(tr("テラピークの結果一覧が映ったPNG/JPG画像を複数枚まとめてアップロード（枚数・CSV行数の固定上限なし）。商品名・平均成約価格・平均送料・販売数をOCRで読み取り、確認後にCSVへ保存します。画像によっては抽出できません。", "Upload multiple PNG/JPG screenshots (no fixed image or CSV row count limit) of the Product Research results table. OCR attempts titles, average sold price, average shipping and units sold. Review all fields before exporting."))
+ocr_converted_rows = None
 screenshot_files = st.file_uploader(tr("スクリーンショットを選択（PNG/JPG）", "Choose screenshot images (PNG/JPG)"), type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="terapeak_screenshots")
 if screenshot_files:
     from terapeak_ocr import parse_screenshot, OUTPUT_COLUMNS, OCRUnavailable, add_usd_conversions
@@ -229,6 +230,7 @@ if screenshot_files:
         st.warning(tr("OCRの価格・販売件数は誤認識の可能性があります。画像と照合してください。", "OCR can misread prices and counts; verify with the images."))
         reviewed = st.data_editor(pd.DataFrame(extracted_rows, columns=OUTPUT_COLUMNS), num_rows="dynamic", use_container_width=True, key="terapeak_ocr_editor")
         converted = add_usd_conversions(reviewed, fx)
+        ocr_converted_rows = converted
         st.caption(tr(f"CSVにUSD換算を付与（1 USD = {fx:.3f} JPY）。為替の取得日時・参照元は左側で確認してください。", f"USD conversion added using 1 USD = {fx:.3f} JPY. See sidebar for FX source/time."))
         st.download_button(tr("確認したテラピーク結果をCSVで保存", "Download reviewed Terapeak CSV"),
                            converted.to_csv(index=False).encode("utf-8-sig"), file_name="terapeak_screenshot_ocr.csv", mime="text/csv")
@@ -242,6 +244,7 @@ if screenshot_files:
         manual_rows = st.data_editor(manual_template, num_rows="dynamic", use_container_width=True, key="terapeak_ocr_manual_editor")
         rows_with_data = manual_rows[manual_rows["title"].astype(str).str.strip().ne("")]
         if not rows_with_data.empty:
+            ocr_converted_rows = add_usd_conversions(rows_with_data, fx)
             st.download_button(tr("確認・入力したデータをCSVで保存", "Download manually reviewed CSV"),
                                add_usd_conversions(rows_with_data, fx).to_csv(index=False).encode("utf-8-sig"),
                                file_name="terapeak_screenshot_reviewed.csv", mime="text/csv")
@@ -251,38 +254,57 @@ if screenshot_files:
         with st.expander(tr("OCRで読み取った全文（誤認識あり）", "Raw OCR text (may contain errors)")):
             st.text_area("OCR", value="\n\n".join(raw_parts), height=250)
             st.download_button(tr("OCR全文をテキスト保存", "Download raw OCR text"), "\n\n".join(raw_parts).encode("utf-8"), file_name="terapeak_raw_ocr.txt", mime="text/plain")
-st.caption(tr("※為替換算は表示された参照レートでの試算です。CSVは画像から読んだ表形式の参考データです。次の『成約参考CSV』とは列が異なるため、そのままは読み込めません。必要に応じてSKUと reference_sold_price_usd 等に整理してください。", "Screenshot CSV is a standalone reference table; it is not directly compatible with the optional sold-data CSV importer below. Convert columns and assign SKU if needed."))
+st.caption(tr("OCRで読み取った商品を下の仕入れ検索に直接引き継げます。仕入れ価格・在庫は別途取得するまで未確認のままです。", "OCR products can flow directly to sourcing. Purchase price and stock remain unverified until separately sourced."))
 
-st.subheader(tr("1. ファイルを読み込む", "1. Upload product data"))
+st.subheader(tr("1. 商品データを取り込む・仕入れ検索につなぐ", "1. Import items and connect to sourcing"))
+from research_import import is_terapeak_csv, convert_terapeak_rows
+
+if "import_terapeak" not in st.session_state:
+    st.session_state.import_terapeak = True
+if ocr_converted_rows is not None and not ocr_converted_rows.empty:
+    st.checkbox(tr("上のスクショから抽出した商品を仕入れ検索へ自動連携", "Automatically send screenshot items to sourcing"), key="import_terapeak")
+    st.info(tr("OCR結果を仕入れ検索に引き継ぎます。仕入れ価格は未取得であり、利益は確定表示しません。", "OCR rows feed sourcing. Purchase cost is missing and profit will remain unavailable."))
 left, right = st.columns(2)
 with left:
-    source_file = st.file_uploader("仕入れ候補 CSV（必須：sku, title, purchase_jpy）", type=["csv"], key="sources")
-    st.download_button(tr("仕入れ候補テンプレートを取得", "Download sourcing template"), (BASE / "data/sourcing_template.csv").read_bytes(),
-                       file_name="sourcing_template.csv", mime="text/csv")
+    source_file = st.file_uploader(tr("仕入れ候補CSV または テラピークCSV", "Sourcing CSV or Terapeak CSV"), type=["csv"], key="sources")
+    st.download_button(tr("仕入れ候補テンプレートを取得", "Download sourcing template"), (BASE / "data/sourcing_template.csv").read_bytes(), file_name="sourcing_template.csv", mime="text/csv")
 with right:
-    sales_file = st.file_uploader("成約参考 CSV（任意：SKU別に手入力整理）", type=["csv"], key="sales")
-    st.download_button(tr("成約参考テンプレートを取得", "Download sold-data template"), (BASE / "data/sales_template.csv").read_bytes(),
-                       file_name="sales_template.csv", mime="text/csv")
+    sales_file = st.file_uploader(tr("成約参考CSV（任意）", "Sold reference CSV (optional)"), type=["csv"], key="sales")
+    st.download_button(tr("成約参考テンプレートを取得", "Download sold-data template"), (BASE / "data/sales_template.csv").read_bytes(), file_name="sales_template.csv", mime="text/csv")
 
 try:
-    source_rows = load_records(source_file.getvalue() if source_file else (BASE / "data/sourcing_sample.csv").read_bytes(),
-                               ["sku", "title", "purchase_jpy"])
-    sales_rows = load_records(sales_file.getvalue() if sales_file else (BASE / "data/sales_sample.csv").read_bytes(),
-                              ["sku"])
+    auto_sales = []
+    if source_file is not None:
+        incoming = pd.read_csv(io.BytesIO(source_file.getvalue()), dtype=str, keep_default_na=False).to_dict("records")
+        if is_terapeak_csv(incoming):
+            source_rows, auto_sales = convert_terapeak_rows(incoming, fx)
+            st.success(tr(f"テラピークCSVを認識：{len(source_rows)}件を仕入れ検索へ連携しました。", f"Terapeak CSV recognized: {len(source_rows)} items sent to sourcing."))
+        else:
+            source_rows = load_records(source_file.getvalue(), ["sku", "title", "purchase_jpy"])
+    elif ocr_converted_rows is not None and st.session_state.import_terapeak:
+        source_rows, auto_sales = convert_terapeak_rows(ocr_converted_rows.to_dict("records"), fx)
+        st.success(tr(f"スクショから{len(source_rows)}件を仕入れ検索へ直接連携しました。CSVを再アップロードする必要はありません。", f"{len(source_rows)} screenshot items connected directly; no CSV re-upload required."))
+    else:
+        source_rows = load_records((BASE / "data/sourcing_sample.csv").read_bytes(), ["sku", "title", "purchase_jpy"])
+    if sales_file is not None:
+        sales_rows = load_records(sales_file.getvalue(), ["sku"])
+    elif auto_sales:
+        sales_rows = auto_sales
+    elif source_file is None and ocr_converted_rows is None:
+        sales_rows = load_records((BASE / "data/sales_sample.csv").read_bytes(), ["sku"])
+    else:
+        sales_rows = []
 except Exception as err:
     st.error(f"CSVエラー: {err}")
     st.stop()
 
-if source_file is None:
-    st.info("仕入れ候補が未アップロードのためデモ3件を使用しています。", icon="ℹ️")
-if sales_file is None and source_file is not None:
-    sales_rows = []  # Never mix DEMO research numbers with real user's sourcing data.
-    st.info("成約参考CSVがないため、販売件数・参考成約単価は空欄です。")
-if source_file is None and sales_file is not None:
-    st.warning("成約参考CSVだけを入れても、SKUがデモの仕入れSKUと一致しなければ結合されません。")
+if source_file is None and not auto_sales:
+    st.info("仕入れ候補CSVやスクショが未入力のため、デモ商品を使用しています。", icon="ℹ️")
 if not source_rows:
-    st.warning("CSVに商品がありません。1行以上の商品を入力してください。")
+    st.warning("有効な商品がありません。テラピークの表を確認してください。")
     st.stop()
+if auto_sales:
+    st.warning(tr("OCR販売情報は参考値です。仕入れ価格・在庫・国際送料がそろうまで利益は計算できません。", "OCR sales data is provisional. Profit cannot be calculated until purchase price and international shipping are supplied."))
 
 # Use PDF-listed basic freight as a fallback ONLY for rows with no explicit quote.
 # An explicit shipping quotation is never overwritten. FedEx zone must be set by seller.
